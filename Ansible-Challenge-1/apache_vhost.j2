@@ -1,0 +1,12 @@
+<VirtualHost *:80>
+    ServerName localhost
+    DocumentRoot {{ project_path }}/public
+
+    <Directory {{ project_path }}/public>
+        AllowOverride All
+        Require all granted
+    </Directory>
+
+    ErrorLog ${APACHE_LOG_DIR}/laravel-ecommerce-error.log
+    CustomLog ${APACHE_LOG_DIR}/laravel-ecommerce-access.log combined
+</VirtualHost>
