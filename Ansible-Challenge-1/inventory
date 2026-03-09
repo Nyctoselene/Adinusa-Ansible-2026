@@ -1,0 +1,2 @@
+[webservers]
+pod-alman-managed1 ansible_host=10.7.7.20 ansible_user=student
