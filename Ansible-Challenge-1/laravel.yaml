@@ -1,0 +1,222 @@
+- name: Deploy Laravel 8 Ecommerce on node-managed1
+  hosts: webservers
+  become: yes
+  gather_facts: yes
+  vars:
+    # Database Configuration
+    db_name: "laravel_ecommerce"
+    db_user: "laravel_user"
+    db_password: "SecurePassword123!"
+
+    # Laravel Configuration
+    repo_url: "https://github.com/kunal254/laravel-8-ecommerce.git"
+    project_path: "/var/www/html/laravel-ecommerce"
+    apache_vhost_name: "laravel-ecommerce"
+    apache_vhost_path: "/etc/apache2/sites-available/laravel-ecommerce.conf"
+
+  tasks:
+    # 1. Install Required Packages
+    - name: Install required packages (php8, npm, git, apache2, mysql-server)
+      apt:
+        name:
+          - php8.0
+          - php8.0-mysql
+          - php8.0-gd
+          - php8.0-curl
+          - php8.0-mbstring
+          - php8.0-xml
+          - php8.0-zip
+          - php8.0-bcmath
+          - npm
+          - git
+          - apache2
+          - mysql-server
+          - python3-pymysql
+          - libapache2-mod-php8.0
+        state: present
+        update_cache: yes
+
+    - name: Add PHP 8.0 PPA
+      ansible.builtin.apt_repository:
+        repo: ppa:ondrej/php
+        state: present
+
+    # 2. Install Composer Binary (Using Shell)
+    - name: Install Composer Binary
+      shell: |
+        curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
+      args:
+        creates: /usr/local/bin/composer
+
+    # 3. Clone Source Code (Using Git Module)
+    - name: Git Clone Laravel
+      ansible.builtin.git:
+        repo: "{{ repo_url }}"
+        dest: "{{ project_path }}"
+        force: true
+        version: main
+
+    # 4. Environment Setup
+    - name: Copy .env.example to .env
+      copy:
+        src: "{{ project_path }}/.env.example"
+        dest: "{{ project_path }}/.env"
+        remote_src: yes
+        mode: '0644'
+
+    # 5. Install Laravel Dependencies (Using Composer Module)
+    # IMPORTANT: This must run BEFORE artisan commands
+    - name: Install Laravel Dependencies
+      community.general.composer:
+        command: install
+        working_dir: "{{ project_path }}"
+        optimize_autoloader: yes
+      environment:
+        COMPOSER_ALLOW_SUPERUSER: "1"
+      become: yes
+
+    - name: Ensure correct permissions on .env
+      file:
+        path: /var/www/html/laravel-ecommerce/.env
+        owner: www-data
+        group: www-data
+        mode: '0664'
+      become: yes
+
+    # 6. Generate Application Key
+    - name: Generate Laravel Application Key
+      command: php artisan key:generate
+      args:
+        chdir: "{{ project_path }}"
+      become: yes
+      become_user: www-data
+
+    - name: Laravel Storage Link
+      command: php artisan storage:link
+      args:
+        chdir: "{{ project_path }}"
+      become: yes
+      become_user: www-data
+
+    # 7. Database Setup (MySQL)
+    - name: Create Laravel Database
+      mysql_db:
+        name: "{{ db_name }}"
+        state: present
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+
+    - name: Create Laravel Database User
+      mysql_user:
+        name: "{{ db_user }}"
+        password: "{{ db_password }}"
+        priv: "{{ db_name }}.*:ALL"
+        host: localhost
+        state: present
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+
+    # 8. Update .env with Database Credentials
+    - name: Update .env with Database Credentials
+      lineinfile:
+        path: "{{ project_path }}/.env"
+        regexp: "^DB_DATABASE="
+        line: "DB_DATABASE={{ db_name }}"
+      notify: Restart Apache
+
+    - name: Update .env with Database User
+      lineinfile:
+        path: "{{ project_path }}/.env"
+        regexp: "^DB_USERNAME="
+        line: "DB_USERNAME={{ db_user }}"
+      notify: Restart Apache
+
+    - name: Update .env with Database Password
+      lineinfile:
+        path: "{{ project_path }}/.env"
+        regexp: "^DB_PASSWORD="
+        line: "DB_PASSWORD={{ db_password }}"
+      notify: Restart Apache
+
+    - name: Update .env with Database Host
+      lineinfile:
+        path: "{{ project_path }}/.env"
+        regexp: "^DB_HOST="
+        line: "DB_HOST=127.0.0.1"
+
+    - name: Clear Laravel configuration cache
+      command: php artisan config:clear
+      args:
+        chdir: /var/www/html/laravel-ecommerce
+      become: yes
+      become_user: www-data
+
+    # 9. Run Migrations
+    - name: Run Laravel Migrations
+      command: php artisan migrate --force
+      args:
+        chdir: "{{ project_path }}"
+      become: yes
+      become_user: www-data
+
+    # 10. Set Permissions
+    - name: Fix Laravel permissions
+      file:
+        path: /var/www/html/laravel-ecommerce
+        owner: www-data
+        group: www-data
+        recurse: yes
+
+    - name: Set Laravel Storage Permissions
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: www-data
+        group: www-data
+        mode: '0775'
+      loop:
+        - "{{ project_path }}/storage"
+        - "{{ project_path }}/bootstrap/cache"
+
+    # 11. Apache Configuration
+    - name: Enable Apache Rewrite Module
+      apache2_module:
+        name: rewrite
+        state: present
+
+    - name: Create Apache Virtual Host
+      template:
+        src: apache_vhost.j2
+        dest: "{{ apache_vhost_path }}"
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Restart Apache
+
+    - name: Disable Default Site
+      file:
+        path: /etc/apache2/sites-enabled/000-default.conf
+        state: absent
+
+    - name: Enable Laravel Site
+      file:
+        src: "{{ apache_vhost_path }}"
+        dest: /etc/apache2/sites-enabled/laravel-ecommerce.conf
+        state: link
+
+    # 12. Start and Enable Services
+    - name: Start and Enable MySQL
+      systemd:
+        name: mysql
+        state: started
+        enabled: yes
+
+    - name: Start and Enable Apache
+      systemd:
+        name: apache2
+        state: started
+        enabled: yes
+
+  handlers:
+    - name: Restart Apache
+      systemd:
+        name: apache2
+        state: restarted
